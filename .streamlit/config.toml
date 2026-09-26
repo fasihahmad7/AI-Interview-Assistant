@@ -1,0 +1,14 @@
+[theme]
+# Matches the Adobe-like dark palette in src/ui/ui_manager.py
+base = "dark"
+primaryColor = "#1473E6"
+backgroundColor = "#2D2D2D"
+secondaryBackgroundColor = "#393939"
+textColor = "#E6E6E6"
+
+[client]
+# Hide the Deploy button and developer menu
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

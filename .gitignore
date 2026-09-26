@@ -28,3 +28,8 @@ Thumbs.db
 
 # Local only files
 PRESENTATION_SLIDES.md
+AI_Interview_Assistant.pptx
+app.py.new
+
+# Database files
+*.db

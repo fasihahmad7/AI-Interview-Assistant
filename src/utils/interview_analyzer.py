@@ -1,7 +1,7 @@
 import google.generativeai as genai
 import json
 from typing import Dict, List, Optional, Any
-from .config import ROLE_CRITERIA, EXPERIENCE_CRITERIA, MODEL_NAME
+from .config import ROLE_CRITERIA, EXPERIENCE_CRITERIA
 
 class InterviewAnalyzer:
     def __init__(self, model):

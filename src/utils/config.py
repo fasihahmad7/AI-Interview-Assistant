@@ -17,12 +17,14 @@ DIFFICULTY_LEVELS = [
     "Easy", "Medium", "Hard", "Legend"
 ]
 JOB_ROLES = [
-    "Software Engineer", "Data Scientist", "Product Manager",
-    "Full Stack Developer", "AI/ML Engineer", "DevOps Engineer",
-    "QA Engineer", "Automation Test Engineer", "SDET",
-    "Performance Test Engineer", "API Test Engineer",
+    # QA roles first - the primary audience
+    "QA Engineer", "Functional Tester", "Automation Test Engineer", "SDET",
+    "API Test Engineer", "Performance Test Engineer",
     "Mobile Test Engineer", "Security Test Engineer",
-    "Test Architect", "QA Lead", "Functional Tester"
+    "QA Lead", "Test Architect",
+    # Other engineering roles
+    "Software Engineer", "Full Stack Developer", "DevOps Engineer",
+    "Data Scientist", "AI/ML Engineer", "Product Manager"
 ]
 EXPERIENCE_RANGES = [
     "0-2 years", "2-5 years", "5-8 years", "8+ years"

@@ -1,40 +1,83 @@
 """
 Common utility functions for the AI Interview Assistant.
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime, timedelta
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
+import logging
+import time
 import speech_recognition as sr
 
-def speech_to_text() -> Optional[str]:
+logger = logging.getLogger(__name__)
+
+def _transcribe_phrase(recognizer: sr.Recognizer, audio: sr.AudioData) -> str:
+    """Transcribe one recorded phrase; returns an empty string if it can't be understood."""
+    try:
+        return recognizer.recognize_google(audio)
+    except sr.UnknownValueError:
+        return ""
+    except sr.RequestError as e:
+        logger.error(f"Speech recognition service unavailable: {e}")
+        return ""
+
+def _join_transcripts(chunks: List[Future]) -> str:
+    """Join the transcripts of the phrases that have finished transcribing so far."""
+    return " ".join(f.result() for f in chunks if f.done() and f.result())
+
+def speech_to_text(on_update: Optional[Callable[[str], None]] = None,
+                   start_timeout: float = 10,
+                   end_silence: float = 3,
+                   max_duration: float = 180) -> Optional[str]:
     """
-    Record audio from the microphone and convert it to text.
-    Returns the recognized text or None if recognition fails.
+    Record a spoken answer from the microphone and convert it to text.
+
+    Listens phrase by phrase so natural pauses don't cut the answer short.
+    Each phrase is transcribed in the background while listening continues,
+    and recording stops once the speaker has been silent for `end_silence` seconds.
+
+    Args:
+        on_update: Called with the (non-empty) transcript so far after each phrase
+        start_timeout: Seconds to wait for the speaker to start talking
+        end_silence: Seconds of silence (after a phrase ends) that finish the answer
+        max_duration: Hard cap on total recording time in seconds
+
+    Returns:
+        The recognized text, or None if nothing could be recognized.
     """
     recognizer = sr.Recognizer()
-    
+    # A phrase ends after this much silence; longer than the 0.8s default
+    # so a short pause mid-sentence doesn't split words
+    recognizer.pause_threshold = 1.2
+    chunks: List[Future] = []
+
     try:
-        with sr.Microphone() as source:
+        with sr.Microphone() as source, ThreadPoolExecutor(max_workers=3) as pool:
             recognizer.adjust_for_ambient_noise(source, duration=1)
-            print("Listening... Speak now.")
-            # Increased limits for longer interview answers
-            # timeout: wait up to 15 seconds for speech to start
-            # phrase_time_limit: allow up to 60 seconds of continuous speech
-            audio = recognizer.listen(source, timeout=15, phrase_time_limit=60)
-            
-        try:
-            text = recognizer.recognize_google(audio)
-            return text
-        except sr.UnknownValueError:
-            print("Could not understand the audio")
-            return None
-        except sr.RequestError:
-            print("Could not request results from the speech recognition service")
-            return None
-            
+            started = time.monotonic()
+
+            while time.monotonic() - started < max_duration:
+                try:
+                    audio = recognizer.listen(
+                        source,
+                        timeout=end_silence if chunks else start_timeout,
+                        phrase_time_limit=30
+                    )
+                except sr.WaitTimeoutError:
+                    break  # Speaker has stopped talking
+
+                chunks.append(pool.submit(_transcribe_phrase, recognizer, audio))
+                transcript_so_far = _join_transcripts(chunks)
+                if on_update and transcript_so_far:
+                    on_update(transcript_so_far)
+
+            text = " ".join(t for t in (f.result() for f in chunks) if t)
+
     except Exception as e:
-        print(f"Error accessing microphone: {str(e)}")
+        logger.error(f"Error accessing microphone: {e}")
         return None
+
+    return text or None
 
 def calculate_average_metrics(metrics_list: List[Dict[str, float]]) -> Dict[str, float]:
     """Calculate average values for a list of metrics."""

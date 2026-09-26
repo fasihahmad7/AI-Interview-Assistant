@@ -2,10 +2,10 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Any
 from ..database.db_manager import DatabaseManager
-from ..utils.config import ROLE_CRITERIA, EXPERIENCE_CRITERIA
+from ..utils.config import ROLE_CRITERIA
 
 class Dashboard:
     def __init__(self):

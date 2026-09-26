@@ -40,7 +40,28 @@ class DatabaseManager:
                      communication_clarity FLOAT,
                      timestamp TIMESTAMP,
                      FOREIGN KEY (interview_id) REFERENCES interviews(id))''')
-        
+
+        # Interview metrics table (per-metric rows)
+        c.execute('''CREATE TABLE IF NOT EXISTS interview_metrics
+                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     interview_id INTEGER,
+                     metric_type TEXT,
+                     metric_value FLOAT,
+                     timestamp TIMESTAMP,
+                     FOREIGN KEY (interview_id) REFERENCES interviews(id))''')
+
+        # Performance analytics table
+        c.execute('''CREATE TABLE IF NOT EXISTS performance_analytics
+                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     interview_id INTEGER,
+                     attention_score FLOAT,
+                     eye_contact_score FLOAT,
+                     speech_clarity_score FLOAT,
+                     confidence_score FLOAT,
+                     body_language_score FLOAT,
+                     timestamp TIMESTAMP,
+                     FOREIGN KEY (interview_id) REFERENCES interviews(id))''')
+
         conn.commit()
         conn.close()
         
@@ -133,7 +154,7 @@ class DatabaseManager:
         finally:
             conn.close()
     
-    def get_performance_history(self, user_id: int, metric_type: str = None,
+    def get_performance_history(self, user_id: int, metric_type: str | None = None,
                               limit: int = 10) -> List[Dict[str, Any]]:
         conn = sqlite3.connect(self.db_file)
         conn.row_factory = sqlite3.Row
@@ -181,5 +202,18 @@ class DatabaseManager:
                 'confidence': row[3] or 0,
                 'body_language': row[4] or 0
             }
+        finally:
+            conn.close()
+
+    def get_recent_interviews(self, user_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+        conn = sqlite3.connect(self.db_file)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        try:
+            c.execute("""SELECT * FROM interviews
+                        WHERE user_id = ?
+                        ORDER BY date DESC LIMIT ?""",
+                     (user_id, limit))
+            return [dict(row) for row in c.fetchall()]
         finally:
             conn.close()

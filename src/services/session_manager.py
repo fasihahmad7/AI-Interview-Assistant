@@ -62,6 +62,7 @@ class SessionManager:
         st.session_state.interview_started = False
         st.session_state.is_processing = False
         st.session_state.current_response = ""
+        st.session_state.question_count = 0
     
     def add_message(self, role: str, content: Any, message_type: str = "message"):
         """Add a message to the conversation history."""
@@ -149,6 +150,8 @@ class SessionManager:
     
     def should_process_input(self, user_input: str) -> bool:
         """Check if user input should be processed."""
-        return (user_input and 
-                user_input != st.session_state.current_response and 
-                not st.session_state.is_processing)
+        return bool(
+            user_input and
+            user_input != st.session_state.current_response and
+            not st.session_state.is_processing
+        )
