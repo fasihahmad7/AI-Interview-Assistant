@@ -4,6 +4,7 @@ Logging configuration for the AI Interview Assistant.
 import logging
 import sys
 from datetime import datetime
+from typing import Optional
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
     """
@@ -39,7 +40,7 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
     
     return logger
 
-def log_user_interaction(action: str, details: dict = None):
+def log_user_interaction(action: str, details: Optional[dict] = None):
     """
     Log user interactions for analytics and debugging.
     
@@ -57,7 +58,7 @@ def log_user_interaction(action: str, details: dict = None):
     
     logger.info(f"User interaction: {log_entry}")
 
-def log_ai_interaction(operation: str, success: bool, details: dict = None):
+def log_ai_interaction(operation: str, success: bool, details: Optional[dict] = None):
     """
     Log AI service interactions for monitoring and debugging.
     

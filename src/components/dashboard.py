@@ -75,7 +75,7 @@ class Dashboard:
         )
         return fig
     
-    def display_metrics(self, user_id: str, role: str):
+    def display_metrics(self, user_id: int, role: str):
         """Display enhanced performance metrics dashboard."""
         recent_interviews = self.db.get_recent_interviews(user_id, limit=5)
         if not recent_interviews:

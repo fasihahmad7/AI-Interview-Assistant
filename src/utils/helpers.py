@@ -1,7 +1,7 @@
 """
 Common utility functions for the AI Interview Assistant.
 """
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, cast
 from datetime import datetime, timedelta
 from concurrent.futures import Future, ThreadPoolExecutor
 import json
@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 def _transcribe_phrase(recognizer: sr.Recognizer, audio: sr.AudioData) -> str:
     """Transcribe one recorded phrase; returns an empty string if it can't be understood."""
     try:
-        return recognizer.recognize_google(audio)
+        # recognize_google is attached to Recognizer at runtime, so type checkers can't see it
+        return recognizer.recognize_google(audio)  # pyright: ignore[reportAttributeAccessIssue]
     except sr.UnknownValueError:
         return ""
     except sr.RequestError as e:
@@ -58,11 +59,12 @@ def speech_to_text(on_update: Optional[Callable[[str], None]] = None,
 
             while time.monotonic() - started < max_duration:
                 try:
-                    audio = recognizer.listen(
+                    # listen() only returns a generator when stream=True
+                    audio = cast(sr.AudioData, recognizer.listen(
                         source,
                         timeout=end_silence if chunks else start_timeout,
                         phrase_time_limit=30
-                    )
+                    ))
                 except sr.WaitTimeoutError:
                     break  # Speaker has stopped talking
 

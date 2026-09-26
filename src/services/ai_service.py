@@ -5,7 +5,7 @@ import google.generativeai as genai
 import time
 import logging
 from functools import wraps
-from typing import Union, List, Dict, Any
+from typing import Union, List, Dict, Any, Optional
 from ..utils.config import MODEL_NAME
 
 logger = logging.getLogger(__name__)
@@ -58,8 +58,9 @@ class AIService:
     def _configure_api(self):
         """Configure the Google AI API."""
         try:
-            genai.configure(api_key=self.api_key)
-            self.model = genai.GenerativeModel(self.model_name)
+            # google.generativeai doesn't declare these as public exports, so type checkers flag them
+            genai.configure(api_key=self.api_key)  # pyright: ignore[reportPrivateImportUsage]
+            self.model = genai.GenerativeModel(self.model_name)  # pyright: ignore[reportPrivateImportUsage]
             logger.info(f"AI service initialized with model: {self.model_name}")
         except Exception as e:
             logger.error(f"Failed to configure AI API: {e}")
@@ -98,7 +99,7 @@ class AIService:
     def generate_interview_question(self, role: str, experience: str, 
                                   interview_type: str, difficulty: str, 
                                   focus_points: str, custom_context: str = "", 
-                                  question_count: int = 0, conversation_history: List[Dict] = None) -> Dict[str, str]:
+                                  question_count: int = 0, conversation_history: Optional[List[Dict]] = None) -> Dict[str, str]:
         """Generate an interview question with expected answer, considering conversation flow."""
         # Parse multiple skills from custom_context
         skills_list = []

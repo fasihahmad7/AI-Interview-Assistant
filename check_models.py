@@ -12,13 +12,13 @@ if not api_key:
     print("🔴 API key (GOOGLE_API_KEY) not found. Check your .env file.")
 else:
     try:
-        genai.configure(api_key=api_key)
+        genai.configure(api_key=api_key)  # pyright: ignore[reportPrivateImportUsage]
         print("✅ Successfully configured API key.")
         print("---")
         print("🤖 Available Models for Your Key:")
         
         # List all models that support generateContent
-        for m in genai.list_models():
+        for m in genai.list_models():  # pyright: ignore[reportPrivateImportUsage]
             if 'generateContent' in m.supported_generation_methods:
                 print(f"- {m.name}")
 
