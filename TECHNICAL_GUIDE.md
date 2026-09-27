@@ -1,389 +1,295 @@
 # AI Interview Assistant - Technical Guide
 
 ## Overview
-This AI Interview Assistant is a Streamlit-based application that uses Google's Gemini AI to conduct interactive technical interviews.
+A Streamlit application that uses Google Gemini (`gemini-2.5-flash`) to run mock interviews: it generates role-specific questions, grades answers, and shows model answers. Answers can be typed or spoken; speech is transcribed with Google's free Web Speech service.
 
-## Architecture Overview
+There is no backend server and no database in the live flow: all state lives in Streamlit's session state for the browser tab.
 
-### 1. **Modular Design Pattern**
-The application follows a clean separation of concerns with distinct layers:
+## Architecture
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   UI Layer      │    │  Controller     │    │   Services      │
-│   (ui_manager)  │◄──►│  (interview_    │◄──►│  (ai_service,   │
-│                 │    │   controller)   │    │   session_mgr)  │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         ▲                        ▲                        ▲
-         │                        │                        │
-         ▼                        ▼                        ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Components    │    │     Utils       │    │   External APIs │
-│  (audio_input,  │    │  (config,       │    │  (Google Gemini │
-│   text_input)   │    │   metrics,      │    │   AI Service)   │
-│                 │    │   helpers)      │    │                 │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
+           ┌──────────────────┐   ┌──────────────────┐                          ┌──────────────────┐
+UI         │      app.py      │──►│    UIManager     │                          │    AudioInput    │
+           └─────────┬────────┘   └──────────────────┘                          └─────────┬────────┘
+                     │                                                                    │
+           ┌─────────▼──────────────────────────────────────────────────────┐             │
+CONTROL    │                      InterviewController                       │             │
+           └─────────┬──────────────────────┬──────────────────────┬────────┘             │
+                     │                      │                      │                      │
+           ┌─────────▼────────┐   ┌─────────▼────────┐   ┌─────────▼────────┐   ┌─────────▼────────┐
+SERVICES   │    AIService     │   │  SessionManager  │   │metrics_calculator│   │ speech_to_text() │
+           └─────────┬────────┘   └─────────┬────────┘   └──────────────────┘   └─────────┬────────┘
+                     │                      │                                             │
+           ┌─────────▼────────┐   ┌─────────▼────────┐                          ┌─────────▼────────┐
+EXTERNAL   │    Gemini API    │   │ st.session_state │                          │Google Web Speech │
+           └──────────────────┘   └──────────────────┘                          └──────────────────┘
 ```
 
-## Core Components Deep Dive
+- **`app.py`** builds the services on every rerun, draws the sidebar, and hands user input to the controller.
+- **`InterviewController`** is the only place that coordinates the AI service, session state and scoring.
+- **Voice** goes `AudioInput` → `speech_to_text()` → Google Web Speech, completely separate from Gemini.
 
-### 1. **AI Service (`src/services/ai_service.py`)**
+### Where things live
 
-**How AI Questions Are Generated:**
+| File | Responsibility |
+|---|---|
+| `app.py` | Entry point: sidebar, main loop |
+| `.streamlit/config.toml` | Dark theme matching the app CSS; hides the Deploy button |
+| `src/controllers/interview_controller.py` | Interview flow (start, each answer) |
+| `src/services/ai_service.py` | Gemini prompts, retries, parsing |
+| `src/services/session_manager.py` | All `st.session_state` reads and writes |
+| `src/ui/ui_manager.py` | CSS and conversation rendering |
+| `src/components/audio_input.py` | Answer box, voice recording, transcript review |
+| `src/components/custom_text_input.py` | Text area (plus a paste-block script, see Known issues) |
+| `src/utils/helpers.py` | `speech_to_text()` and small helpers |
+| `src/utils/metrics_calculator.py` | Score extraction and weighting |
+| `src/utils/config.py` | Roles, levels, model name, focus map |
+| `src/utils/interview_analyzer.py` | `validate_input()` (minimum answer length) |
+| `check_models.py` | Lists the Gemini models your key can use |
+
+In the repo but **not wired into the app yet**: `components/dashboard.py`, `database/db_manager.py`, and `InterviewAnalyzer.analyze_response()`.
+
+## Streamlit's rerun model
+
+Every interaction (click, typing, submit) re-runs `app.py` from top to bottom, and the UI is rebuilt from `st.session_state`. Anything that must survive a click has to live there:
+
+| Key | Purpose |
+|---|---|
+| `messages` | The conversation (questions, answers, assessments) |
+| `interview_history` | Per-answer record used by Export |
+| `session_stats` | Answered count and latest metrics |
+| `question_count` | Drives skill rotation |
+| `is_processing` | Blocks double submits |
+| `current_response` | Ignores duplicate input |
+| `last_request_time` | 1-second rate limit |
+| `voice_draft` | Transcript awaiting review: `{"question", "text", "take"}` |
+| `voice_take` | Gives each review box a fresh widget key |
+
+Refreshing the browser clears all of this.
+
+## Life of an answer
+
+`InterviewController.process_user_response()` runs these steps; the two Gemini calls happen one after the other:
+
+1. **Answer arrives** - `AudioInput.get_user_input()` returns text when the user clicks *Submit answer*, or *Submit for evaluation* on a voice draft.
+2. **Guard** - `should_process_input()`: not empty, not a duplicate, not already processing.
+3. **Validate** - `InterviewAnalyzer.validate_input()`: at least 10 characters.
+4. **Rate limit** - `check_rate_limit()`: at least 1 second since the last request.
+5. **Store the answer** - `add_message("user", ...)`.
+6. **Grade it (Gemini call #1)** - `AIService.evaluate_response()`.
+7. **Ask the next question (Gemini call #2)** - `question_count += 1`, then `generate_interview_question()`.
+8. **Save** - assessment and next question added to `messages`; `add_interview_history()`.
+9. **Score** - `calculate_role_specific_metrics()` → `update_session_stats()`.
+10. **Rerun** - `st.rerun()`; the page redraws.
+
+Failures in steps 2-4 show a warning and stop. Steps 5-9 run inside `try/finally`, so `is_processing` is always reset; an exception shows an error message.
+
+### Message model
+
 ```python
-def generate_interview_question(self, role, experience, interview_type, difficulty, focus_points):
-    # Constructs a detailed prompt with:
-    # - Role-specific context (Software Engineer, Data Scientist, etc.)
-    # - Experience level expectations (0-2 years, 2-5 years, etc.)
-    # - Interview type focus (Technical, Behavioral, Problem Solving)
-    # - Difficulty scaling (Easy → Legend)
-    
-    context = f"""As an expert interviewer for a {role} position...
-    Required Question Criteria:
-    1. Must be highly relevant to the {role} role
-    2. Appropriate for {experience} experience level
-    3. Follows {interview_type.lower()} interview style
-    4. Matches {difficulty.lower()} difficulty"""
-    
-    # Sends to Google Gemini AI and parses structured response
-    response = self.generate_content(context)
-    # Returns: {"question": "...", "expected_answer": "..."}
+st.session_state.messages = [
+  {"role": "assistant", "type": "question",
+   "content": {"question": "...", "expected_answer": "..."}},
+  {"role": "user", "type": "message", "content": "I would first ..."},
+  {"role": "assistant", "type": "assessment", "content": "Technical Assessment:\n- ..."},
+  {"role": "assistant", "type": "question", "content": {...}},
+]
 ```
 
-**AI Response Evaluation Process:**
+### Rendering
+
+`UIManager.render_conversation()` shows each exchange as **Question → Your Response → Assessment → Model Answer**. A question's expected answer is held back and only rendered after that question's assessment.
+
+`UIManager._format_rich_text()` turns Gemini's markdown-like text into HTML:
+
+| Input | Output |
+|---|---|
+| `<`, `>` in any text | Escaped first (`html.escape`), so e.g. `List<WebElement>` displays correctly |
+| `**bold**` | `<b>bold</b>` |
+| `` `code` `` | `<code>code</code>` |
+| Line ending with `:` | Section heading |
+| `- `, `* `, `• `, `1. ` | Bullet item |
+| `Label: 7.5 - reason` | Bullet item |
+
+Each assessment shows a score badge computed from that assessment alone.
+
+## Prompts and parsing
+
+### Prompt #1 - ask a question (`generate_interview_question`)
+Built from five blocks:
+1. **Role context** - role, experience, interview type, difficulty, focus points
+2. **Conversation history** - the last 4 messages, with answers truncated to 200 characters
+3. **Skill strategy** - which focus skill to ask about next (see below)
+4. **Question criteria** - relevance, level, style, plus definitions of each difficulty
+5. **Output format** - `Question: ...` / `Expected Answer: ...`
+
+Parsing is a string split:
+
 ```python
-def evaluate_response(self, role, experience, interview_type, difficulty, question, user_answer):
-    # Creates comprehensive evaluation prompt with:
-    # - Original question context
-    # - User's actual response
-    # - Role-specific evaluation criteria
-    # - Experience-level expectations
-    
-    # AI analyzes and returns structured feedback:
-    # - Technical Assessment (Knowledge Depth, Implementation, Best Practices)
-    # - Communication Assessment (Clarity, Structure, Professionalism)
-    # - Experience Level Match
-    # - Follow-up question generation
+parts = reply.split("Expected Answer:", 1)
+question = parts[0].replace("Question:", "", 1).strip()
+expected = parts[1].strip() if len(parts) > 1 else "No model answer provided."
 ```
 
-**Error Handling & Retry Logic:**
+If Gemini omits the marker, the whole reply becomes the question.
+
+### Prompt #2 - grade the answer (`evaluate_response`)
+Demands an exact format with decimal scores so the regexes can find them:
+
+```
+Technical Assessment:
+- Knowledge Depth: 7.5 - ...
+- Implementation Understanding: 6.0 - ...
+- Best Practices Awareness: 7.0 - ...
+Communication Assessment:
+- Clarity / Structure / Professionalism: n.n - ...
+Experience Level Match:
+- Expected Level / Demonstrated Level / Score: 7.0
+Key Strengths: / Areas for Improvement:
+Follow-up Question:
+Expected Answer:
+```
+
+The reply is split on `Follow-up Question:`. The first part is shown as the assessment and parsed for scores. The follow-up question and answer are returned but **not used**; the next question comes from prompt #1.
+
+### Skill rotation
+Focus areas are split on commas. Example with `Selenium, API testing, CI/CD`:
+
+| `question_count` | Previous skill | Guidance sent to Gemini |
+|---|---|---|
+| 0 | - | First question: focus on Selenium |
+| 1 | Selenium | Weak answer? One follow-up on Selenium, else move to API testing |
+| 2 | API testing | Weak? Follow-up, else move to CI/CD |
+| 3 | CI/CD | Weak? Follow-up, else move to Selenium |
+| 4 | Selenium | **Must** move to API testing |
+| 5 | API testing | **Must** move to CI/CD |
+
+Rotation is computed from `question_count`, not from what Gemini actually asked, so it can drift after follow-ups.
+
+## Scoring
+
+`metrics_calculator.extract_scores_from_text()` pulls seven numbers from each assessment, and `calculate_role_specific_metrics()` averages them across all assessments in the session:
+
+| Sidebar label | Internal key | Calculation |
+|---|---|---|
+| Technical | `domain_knowledge` | Mean of Knowledge Depth, Implementation, Best Practices |
+| Communication | `methodology_understanding` | Mean of Clarity, Structure, Professionalism |
+| Experience Match | `practical_experience` | The `Score:` line under Experience Level Match |
+| Overall | `overall_score` | `0.5 × Technical + 0.3 × Experience + 0.2 × Communication` |
+
+Worked example: Technical (7.5, 6.5, 7.0) = 7.0; Communication (8.0, 7.0, 8.5) = 7.8; Experience = 7.0 → Overall = 0.5×7.0 + 0.3×7.0 + 0.2×7.8 = **7.2**.
+
+### When parsing fails
+1. **Labelled match** - three regex patterns per metric (`Knowledge Depth: 7.5`, `- Knowledge Depth: 7.5`, `Knowledge ... 7.5/10`); only values 1-10 count.
+2. **Positional fallback** - no labels found: the first six numbers between 1 and 10 in the text, in order (can mis-assign).
+3. **Placeholder scores** - still nothing: the controller fills in `6.0 + 0.5 × questions` (max 8.5). These are not real grades.
+
+## Voice pipeline
+
+`helpers.speech_to_text(on_update, start_timeout=10, end_silence=3, max_duration=180)`:
+
+1. **Calibrate** - 1 second of ambient noise sets the energy threshold.
+2. **Listen** - `recognizer.listen()` returns one phrase; a phrase ends after a 1.2 s pause (`pause_threshold`) and is capped at 30 s.
+3. **Transcribe** - each phrase is submitted to a thread pool and sent to `recognize_google()` while listening continues. Short requests also suit the free endpoint.
+4. **Live update** - `on_update` receives the joined transcript so far, shown in an `st.status` panel.
+5. **Stop** - after 3 s of silence following a phrase, 10 s with no speech at the start, or 180 s in total.
+
+`AudioInput` stores the result as `voice_draft`, tied to the current question number, and renders a review panel: **Submit for evaluation**, **Record again**, or **Type instead**. The draft survives validation failures and API errors, and is dropped once the answer is accepted (the question number moves on). A confirmed draft then follows the same path as a typed answer.
+
+Streamlit can't process clicks while the recording call is blocking, so silence is the only way to end a recording.
+
+## Guardrails
+
+| Guardrail | Behaviour |
+|---|---|
+| Retry | `retry_on_error(max_retries=3, delay=2)` on `generate_content`: up to 3 attempts, waiting 2 s then 4 s. Empty replies count as failures. |
+| Quota | An error mentioning "quota" stops retrying immediately. |
+| Rate limit | At least 1 second between submissions. |
+| Minimum length | Answers under 10 characters are rejected with a warning. |
+| Double submit | `is_processing` and `current_response` block repeats. |
+| No lost input | On error, the typed text or voice draft stays for a resubmit. |
+
+## Configuration
+
+| What | Where |
+|---|---|
+| API key | `.env` (`GOOGLE_API_KEY`). `.env.example` also lists `LOG_LEVEL`, but `app.py` currently hard-codes `INFO`. |
+| Roles and levels | `src/utils/config.py` - `JOB_ROLES` (QA roles listed first), `EXPERIENCE_RANGES`, `INTERVIEW_TYPES`, `DIFFICULTY_LEVELS` |
+| Gemini model | `config.MODEL_NAME` |
+| Prompts | `src/services/ai_service.py` |
+| Score weights | `src/utils/metrics_calculator.py` |
+| Voice timing | `speech_to_text(end_silence=..., start_timeout=..., max_duration=...)` |
+| Look and feel | `.streamlit/config.toml` and the CSS in `ui_manager.py` |
+
+`TEMPERATURE`, `TOP_P` and `TOP_K` in `config.py` are defined but not currently passed to the model.
+
+## Testing
+
+```bash
+python -m pytest -q
+```
+
+| Suite | Tests | Covers |
+|---|---|---|
+| `test_session_manager.py` | 15 | State init and reset, input validation, duplicate and busy guards, adding messages |
+| `test_speech_to_text.py` | 7 | Microphone and recognizer mocked: phrases joined across pauses, timeouts, unintelligible audio, microphone errors |
+| `test_ui_formatting.py` | 7 | Bullets, headings, bold and code, HTML escaping, no stray spacing |
+
+Not automated: the Streamlit UI end to end, real Gemini replies, and a real microphone.
+
+### Testing without using API quota
+Replace `AIService.generate_content` with canned replies and run the real app. Save this as `mock_app.py` in the project root and run `streamlit run mock_app.py`:
+
 ```python
-@retry_on_error(max_retries=3, delay=2)
-def generate_content(self, prompt):
-    # Implements exponential backoff retry mechanism
-    # Handles specific Google AI API errors:
-    # - Quota exceeded → User-friendly message
-    # - Invalid API key → Configuration guidance
-    # - Network issues → Automatic retry with delay
+import runpy
+from src.services import ai_service
+
+QUESTION = "Question: ...\nExpected Answer:\n- ..."
+ASSESSMENT = "Technical Assessment:\n- Knowledge Depth: 7.5 - ..."
+
+def fake(self, prompt):
+    if "evaluate this response" in str(prompt):
+        return ASSESSMENT
+    return QUESTION
+
+ai_service.AIService.generate_content = fake
+runpy.run_path("app.py", run_name="__main__")
 ```
 
-### 2. **Session Management (`src/services/session_manager.py`)**
+Edit the canned text to exercise the parsing fallbacks (remove scores, drop the `Expected Answer:` marker, add HTML).
 
-**Streamlit State Management:**
-```python
-def _initialize_session_state(self):
-    defaults = {
-        'messages': [],              # Conversation history
-        'interview_history': [],     # Persistent interview data
-        'session_stats': {...},      # Real-time metrics
-        'is_processing': False,      # Prevents duplicate submissions
-        'current_response': ""       # Tracks current user input
-    }
-```
+### Manual QA charter
+- **Configuration** - every role × level × type × difficulty; focus areas with 1, 3 and 10 skills; changing the setup mid-interview (the next question uses the new settings); New Interview fully resets.
+- **Voice** - long pauses mid-answer; total silence; noisy room; no or blocked microphone; editing the transcript; Record again.
+- **Input edge cases** - under 10 characters; HTML, `List<T>`, emoji; very long answers; double-clicking Submit; refreshing mid-interview.
+- **AI and network** - quota exhausted; offline or slow network; a reply with no scores; a reply missing `Expected Answer:`.
 
-**Rate Limiting Implementation:**
-```python
-def check_rate_limit(self):
-    current_time = time.time()
-    time_diff = current_time - st.session_state.last_request_time
-    if time_diff < 1.0:  # Minimum 1 second between requests
-        return False, 1.0 - time_diff
-    # Prevents API abuse and ensures smooth user experience
-```
+## Known issues
 
-### 3. **Interview Controller (`src/controllers/interview_controller.py`)**
+| Severity | Issue |
+|---|---|
+| High | Placeholder scores are shown when no scores can be parsed |
+| Medium | Two Gemini calls per answer; the follow-up generated during grading is discarded |
+| Medium | Session is lost on browser refresh; no persistence |
+| Medium | Voice relies on Google's free, unofficial speech endpoint |
+| Low | Skill rotation follows `question_count`, not the topics actually asked |
+| Low | The paste-blocking script never runs (it's inside a sandboxed iframe) |
+| Low | Unused modules: `dashboard.py`, `db_manager.py`, `analyze_response()` |
+| Low | Any error containing the word "invalid" is reported as an invalid API key |
 
-**Interview Flow Orchestration:**
-```python
-def process_user_response(self, user_input, role, experience, interview_type, difficulty):
-    # 1. Input validation (length, content quality)
-    # 2. Rate limiting check
-    # 3. AI evaluation request
-    # 4. Response parsing and storage
-    # 5. Metrics calculation
-    # 6. Follow-up question generation
-    # 7. Session state updates
-```
+## Security and privacy
+- The API key is read from `.env`, which is excluded from git.
+- User answers and AI text are HTML-escaped before rendering.
+- Interview content is sent to Google's Gemini API, and voice audio to Google's speech service. Don't enter client-confidential information.
+- Nothing is stored on disk by the running app; Export is a download the user triggers.
 
-**Business Logic Coordination:**
-- Manages the complete interview lifecycle
-- Coordinates between AI service and session management
-- Handles error recovery and user feedback
-- Ensures data consistency across components
-
-### 4. **Metrics Calculation (`src/utils/metrics_calculator.py`)**
-
-**Intelligent Score Extraction:**
-```python
-def extract_scores_from_text(content):
-    # Multi-strategy approach:
-    # Strategy 1: Targeted regex patterns for specific metrics
-    patterns = {
-        'knowledge_depth': [r'Knowledge Depth:\s*(\d+(?:\.\d+)?)'],
-        'implementation': [r'Implementation Understanding:\s*(\d+(?:\.\d+)?)'],
-        # ... more patterns
-    }
-    
-    # Strategy 2: Fallback to any numerical scores in context
-    # Strategy 3: Content quality estimation based on keywords
-```
-
-**Cohesive Scoring Logic:**
-```python
-def calculate_role_specific_metrics(role, experience, messages):
-    # Weighted scoring system:
-    overall_score = (
-        domain_knowledge * 0.5 +      # 50% technical skills
-        practical_experience * 0.3 +   # 30% experience match
-        methodology_understanding * 0.2 # 20% communication
-    )
-    # Ensures mathematical consistency across all metrics
-```
-
-### 5. **UI Management (`src/ui/ui_manager.py`)**
-
-**Adobe-Inspired Styling:**
-```python
-def _apply_custom_css(self):
-    # Implements professional dark theme with:
-    # - Consistent color palette (#2D2D2D, #1473E6, #E6E6E6)
-    # - Responsive design elements
-    # - Accessibility-compliant contrast ratios
-    # - Smooth animations and transitions
-```
-
-**Dynamic Content Rendering:**
-```python
-def render_conversation(self, messages):
-    # Intelligently displays:
-    # - Questions with contextual styling
-    # - User responses with distinct formatting
-    # - AI assessments with structured layout
-    # - Model answers (shown after user responds)
-```
-
-## Data Flow Architecture
-
-### 1. **Interview Initialization Flow**
-```
-User Selects Parameters → Interview Controller → AI Service → Question Generation
-     ↓                           ↓                    ↓              ↓
-Role/Experience/Type → Focus Points Calculation → Gemini API → Structured Response
-     ↓                           ↓                    ↓              ↓
-Session State Update ← Message Storage ← Response Parsing ← AI Response
-```
-
-### 2. **Response Processing Flow**
-```
-User Input → Validation → Rate Limiting → AI Evaluation → Score Extraction
-     ↓           ↓             ↓              ↓               ↓
-Audio/Text → Length Check → Time Check → Gemini Analysis → Regex Parsing
-     ↓           ↓             ↓              ↓               ↓
-Processing → Error Handling → Wait Period → Structured Feedback → Metrics Update
-```
-
-### 3. **Real-time Updates Flow**
-```
-Metrics Calculation → Session Stats Update → UI Re-render → User Feedback
-        ↓                      ↓                 ↓              ↓
-Score Aggregation → State Management → Streamlit Rerun → Visual Updates
-```
-
-## Key Technical Decisions
-
-### 1. **Why Google Gemini AI?**
-- **Advanced reasoning capabilities** for nuanced interview evaluation
-- **Structured output support** for consistent response parsing
-- **Cost-effective** compared to GPT-4 for this use case
-- **Fast response times** for real-time interview experience
-
-### 2. **Why Streamlit?**
-- **Rapid prototyping** capabilities for AI applications
-- **Built-in state management** perfect for conversational interfaces
-- **Easy deployment** options (Streamlit Cloud, Docker, etc.)
-- **Rich UI components** without complex frontend development
-
-### 3. **Modular Architecture Benefits**
-- **Testability**: Each component can be unit tested independently
-- **Maintainability**: Clear separation of concerns
-- **Scalability**: Easy to add new features or modify existing ones
-- **Debugging**: Isolated components make issue tracking easier
-
-## Configuration Management
-
-### 1. **Environment Variables**
-```python
-# .env file structure:
-GOOGLE_API_KEY=your_api_key_here    # Required for AI functionality
-LOG_LEVEL=INFO                      # Controls logging verbosity
-APP_NAME=AI Interview Assistant     # Application identification
-```
-
-### 2. **Role-Specific Configuration**
-```python
-# src/utils/config.py
-ROLE_CRITERIA = {
-    "Software Engineer": {
-        "technical_depth": {"weight": 0.4},
-        "problem_solving": {"weight": 0.3},
-        "best_practices": {"weight": 0.3}
-    }
-    # Customizable evaluation criteria per role
-}
-```
-
-### 3. **Experience Level Scaling**
-```python
-EXPERIENCE_CRITERIA = {
-    "0-2 years": {"base_score": 6.0, "threshold": 0.7},
-    "2-5 years": {"base_score": 7.0, "threshold": 0.75},
-    # Adaptive scoring based on experience expectations
-}
-```
-
-## Error Handling Strategy
-
-### 1. **API Error Management**
-- **Quota exceeded**: Graceful degradation with user notification
-- **Network issues**: Automatic retry with exponential backoff
-- **Invalid responses**: Fallback scoring mechanisms
-- **Rate limiting**: Built-in request throttling
-
-### 2. **User Input Validation**
-- **Length validation**: Minimum character requirements
-- **Content quality**: Basic relevance checking
-- **Duplicate prevention**: Session state tracking
-- **Sanitization**: Input cleaning for AI processing
-
-### 3. **Logging and Monitoring**
-```python
-# Comprehensive logging system:
-logger.info("User interaction: interview_started")
-logger.warning("Rate limit exceeded for user")
-logger.error("AI service unavailable", exc_info=True)
-# Enables production debugging and performance monitoring
-```
-
-## Performance Optimizations
-
-### 1. **Caching Strategy**
-- **Session state caching**: Prevents redundant calculations
-- **AI response caching**: Could be implemented for common questions
-- **UI component caching**: Streamlit's built-in optimization
-
-### 2. **Async Considerations**
-- **Non-blocking UI**: Spinner indicators during AI processing
-- **Background processing**: Session state management
-- **Resource management**: Proper cleanup and memory management
-
-## Security Considerations
-
-### 1. **API Key Management**
-- Environment variable storage (never in code)
-- Local .env file for development
-- Secure deployment practices for production
-
-### 2. **Input Sanitization**
-- User input validation before AI processing
-- Content filtering for inappropriate material
-- Rate limiting to prevent abuse
-
-### 3. **Data Privacy**
-- No persistent storage of sensitive interview data
-- Session-based data management
-- Optional export functionality under user control
-
-## Testing Strategy
-
-### 1. **Unit Testing**
-```python
-# tests/test_session_manager.py
-def test_validate_user_input_valid(self):
-    session_manager = SessionManager()
-    is_valid, error = session_manager.validate_user_input("Valid response")
-    self.assertTrue(is_valid)
-```
-
-### 2. **Integration Testing**
-- AI service integration tests
-- End-to-end interview flow testing
-- Error scenario validation
-
-### 3. **Manual QA Approach**
-- User experience testing across different roles
-- Edge case validation (network issues, invalid inputs)
-- Performance testing under load
-
-## Deployment Considerations
-
-### 1. **Local Development**
+## Running locally
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+# .env
+GOOGLE_API_KEY=your_key_here
+
+streamlit run app.py          # run from the project folder so .streamlit/config.toml is used
+python -m pytest -q
+python check_models.py        # list models your key can use
 ```
-
-### 2. **Production Deployment**
-- Streamlit Cloud integration
-- Docker containerization support
-- Environment variable configuration
-- Health check endpoints
-
-### 3. **Monitoring and Maintenance**
-- Log aggregation for error tracking
-- Performance metrics collection
-- User feedback integration
-- Regular dependency updates
-
-## Future Enhancement Opportunities
-
-### 1. **Technical Improvements**
-- Database integration for persistent storage
-- Advanced caching mechanisms
-- Real-time collaboration features
-- Mobile-responsive design enhancements
-
-### 2. **AI Enhancements**
-- Multi-model AI integration (GPT, Claude, etc.)
-- Custom fine-tuned models for specific roles
-- Advanced natural language processing
-- Sentiment analysis integration
-
-### 3. **Feature Additions**
-- Video interview capabilities
-- Team interview scenarios
-- Industry-specific question banks
-- Advanced analytics and reporting
-
----
-
-## Developer FAQ
-
-**Q: How does the AI generate relevant questions?**
-A: The system uses carefully crafted prompts that include role context, experience level, interview type, and difficulty. The AI (Google Gemini) processes these parameters to generate contextually appropriate questions with expected answers.
-
-**Q: How are user responses evaluated?**
-A: User responses are sent to the AI with the original question context and evaluation criteria. The AI provides structured feedback including technical assessment, communication evaluation, and experience level matching.
-
-**Q: How does the scoring system work?**
-A: The system extracts numerical scores from AI feedback using regex patterns, then calculates weighted averages: 50% technical skills, 30% experience match, 20% communication skills.
-
-**Q: How is session state managed?**
-A: Streamlit's session state stores conversation history, user progress, and real-time metrics. The SessionManager class provides a clean interface for state operations.
-
-**Q: How does error handling work?**
-A: Multi-layered approach: retry mechanisms for API calls, input validation, rate limiting, fallback scoring, and comprehensive logging for debugging.
-
-**Q: How can the system be extended?**
-A: The modular architecture allows easy extension: add new services, modify evaluation criteria in config files, create new UI components, or integrate additional AI models.
-
-This technical guide provides comprehensive coverage of the AI Interview Assistant's architecture, implementation details, and operational considerations for confident technical discussions.
